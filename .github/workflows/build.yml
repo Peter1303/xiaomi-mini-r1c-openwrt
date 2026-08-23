@@ -8,6 +8,7 @@ on:
       - 'feeds.conf'
       - 'diy-part1.sh'
       - 'diy-part2.sh'
+      - 'README.md'
       - '.github/workflows/build.yml'
   workflow_dispatch:
     inputs:
@@ -44,7 +45,7 @@ jobs:
 
     steps:
       - name: Maximize build space
-        uses: easimon/maximize-build-space@master
+        uses: easimon/maximize-build-space@v10
         with:
           root-reserve-mb: 4096
           swap-size-mb: 4096
@@ -95,7 +96,8 @@ jobs:
         working-directory: openwrt
         run: |
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          # 仅安装 .config 中选中的包，避免 -a 全装 Lean 系第三方源时因版本不兼容报错
+          ./scripts/feeds install -a -d n || ./scripts/feeds install $(grep -E '^CONFIG_PACKAGE_' ../.config | sed -n 's/^CONFIG_PACKAGE_\([a-zA-Z0-9_.*-]*\)=y/\1/p')
 
       - name: Generate config
         working-directory: openwrt
@@ -121,6 +123,12 @@ jobs:
           export CCACHE_DIR="$HOME/.ccache"
           export USE_CCACHE=1
           make -j"$(nproc)" || make -j1 V=s
+          status=$?
+          echo "===== DIAGNOSTICS (disk / rootfs size) ====="
+          df -h
+          du -sh staging_dir/target-*/root-* 2>/dev/null || true
+          echo "===== END DIAGNOSTICS ====="
+          exit $status
 
       - name: Organize artifacts
         if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
