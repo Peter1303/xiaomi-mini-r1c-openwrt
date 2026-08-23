@@ -1,0 +1,142 @@
+name: Build OpenWrt for Xiaomi MiWiFi Mini
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.config'
+      - 'feeds.conf'
+      - 'diy-part1.sh'
+      - 'diy-part2.sh'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      repo_branch:
+        description: 'OpenWrt source branch'
+        required: false
+        default: 'openwrt-24.10'
+      upload_artifact:
+        description: 'Upload firmware as artifact'
+        required: false
+        default: 'true'
+  schedule:
+    - cron: '0 16 * * 0'
+
+concurrency:
+  group: build-miwi-mini
+  cancel-in-progress: false
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: ${{ github.event.inputs.repo_branch || 'openwrt-24.10' }}
+  CONFIG_FILE: .config
+  FEEDS_CONF: feeds.conf
+  DIY_PART1: diy-part1.sh
+  DIY_PART2: diy-part2.sh
+  TARGET_DIR: bin/targets/ramips/mt7620
+  ARTIFACT_NAME: openwrt-miwi-mini-firmware
+  UPLOAD_ARTIFACT: ${{ github.event.inputs.upload_artifact || 'true' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 4096
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential clang flex g++ gawk gcc-multilib \
+            gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip \
+            zlib1g-dev file wget ccache
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-openwrt-mt7620-ccache-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-mt7620-ccache-
+
+      - name: Cache dl directory
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ runner.os }}-openwrt-mt7620-dl-${{ hashFiles('feeds.conf') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-mt7620-dl-
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" openwrt
+          cd openwrt && git log -1
+
+      - name: Apply custom feeds
+        run: |
+          [ -e "$FEEDS_CONF" ] && cp "$FEEDS_CONF" openwrt/feeds.conf
+          chmod +x "$DIY_PART1"
+          cd openwrt && ../"$DIY_PART1"
+
+      - name: Update and install feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate config
+        working-directory: openwrt
+        run: |
+          [ -e "../$CONFIG_FILE" ] && cp "../$CONFIG_FILE" .config
+          make defconfig
+
+      - name: DIY Part2
+        run: |
+          chmod +x "$DIY_PART2"
+          cd openwrt && ../"$DIY_PART2"
+
+      - name: Download sources
+        working-directory: openwrt
+        run: |
+          make download -j"$(nproc)"
+          find dl -size -1024c -exec ls -l {} \;
+          df -h
+
+      - name: Compile firmware
+        working-directory: openwrt
+        run: |
+          export CCACHE_DIR="$HOME/.ccache"
+          export USE_CCACHE=1
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Organize artifacts
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        run: |
+          cd openwrt
+          mkdir -p ../output
+          cp -f "$TARGET_DIR"/*squashfs-sysupgrade*.bin ../output/ 2>/dev/null || true
+          cp -f "$TARGET_DIR"/*.manifest ../output/ 2>/dev/null || true
+          cp -f "$TARGET_DIR"/config.buildinfo ../output/ 2>/dev/null || true
+          ls -lh ../output
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        if: env.UPLOAD_ARTIFACT == 'true' && !cancelled()
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: output/
+          retention-days: 7
+          compression-level: 9
