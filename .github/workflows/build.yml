@@ -76,15 +76,18 @@ jobs:
       - name: Cache dl directory
         uses: actions/cache@v4
         with:
-          path: openwrt/dl
+          path: dl-cache
           key: ${{ runner.os }}-openwrt-mt7620-dl-${{ hashFiles('feeds.conf') }}
           restore-keys: |
             ${{ runner.os }}-openwrt-mt7620-dl-
 
       - name: Clone OpenWrt source
         run: |
+          # 缓存放在独立 dl-cache 目录，避免提前创建 openwrt/ 导致 clone 失败
           git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" openwrt
           cd openwrt && git log -1
+          mkdir -p dl
+          [ -d ../dl-cache ] && cp -an ../dl-cache/. dl/ 2>/dev/null || true
 
       - name: Apply custom feeds
         run: |
